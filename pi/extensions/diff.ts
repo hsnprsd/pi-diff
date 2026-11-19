@@ -497,8 +497,8 @@ export default function (pi: ExtensionAPI) {
                         const previousColumn = column;
                         if (keybindings.matches(data, "tui.select.down") || matchesKey(data, "j")) select(cursor + 1);
                         else if (keybindings.matches(data, "tui.select.up") || matchesKey(data, "k")) select(cursor - 1);
-                        else if (matchesKey(data, "d") || matchesKey(data, "space")) select(cursor + scroll.viewportHeight);
-                        else if (matchesKey(data, "u")) select(cursor - scroll.viewportHeight);
+                        else if (matchesKey(data, "d") || matchesKey(data, "pageDown")) select(cursor + scroll.viewportHeight);
+                        else if (matchesKey(data, "u") || matchesKey(data, "pageUp")) select(cursor - scroll.viewportHeight);
                         else if (matchesKey(data, "home") || matchesKey(data, "g")) select(0);
                         else if (matchesKey(data, "end") || matchesKey(data, "shift+g")) select(rows.length - 1);
                         else if (matchesKey(data, "n") || matchesKey(data, "tab")) jump(files, false);
@@ -541,7 +541,7 @@ export default function (pi: ExtensionAPI) {
                         };
                         if (help) return [
                             `Review details · context ${context}${loading || failed ? "" : ` · ${files.length} patches · +${added} −${removed}${limited ? " · PARTIAL" : ""}`}`,
-                            "Review keys", "↑↓ / k j   Select line", "u d / Space   Page up/down (Space: down)",
+                            "Review keys", "↑↓ / k j   Select line", "PgUp PgDown / u d   Page up/down",
                             "Home End / g G   First/last line", "←→ / h l   Pan", "n N / Tab Shift+Tab   Next/previous file (p: previous)",
                             "[ ]   Previous/next hunk", "+ -   Adjust context", "v   Switch review view",
                             "c   Add/edit comment", "Enter   Submit pending comments to chat", "q   Close review",
