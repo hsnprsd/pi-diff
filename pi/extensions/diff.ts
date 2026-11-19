@@ -353,15 +353,19 @@ export default function (pi: ExtensionAPI) {
                         scroll.updateLayout(lines.length, height, () => tui.requestRender());
                         select(cursor);
                         const file = files.length ? Math.max(0, files.findLastIndex((line) => line <= cursor)) : -1;
-                        const status = loading ? "Loading…" : failed ? "Could not load changes" : `${files.length} patches · +${added} −${removed}${limited ? " · PARTIAL" : ""}`;
-                        const title = ` Diff · context ${context} · ${status}`;
+                        const status = loading ? "Loading…" : failed ? "Could not load changes" : `${files.length} patches · `;
+                        let title = theme.fg("accent", ` Diff · context ${context} · ${status}`);
+                        if (!loading && !failed) {
+                            title += `${theme.fg("toolDiffAdded", `+${added}`)} ${theme.fg("toolDiffRemoved", `−${removed}`)}`;
+                            if (limited) title += theme.fg("accent", " · PARTIAL");
+                        }
                         const patch = !loading && file >= 0
                             ? ` Patch ${file + 1}/${files.length} · ${lines[files[file]].replace(/^diff --(git|cc|combined) /, "")}`
                             : "";
                         const body = loading ? [theme.fg("muted", "Loading changes… (Esc to cancel)")] : scroll.render(Math.max(1, innerWidth - 2)).slice(scroll.scrollTop, scroll.scrollTop + height);
                         return [
                             truncateToWidth(theme.fg("border", "╭" + "─".repeat(innerWidth) + "╮"), width, ""),
-                            row(theme.fg("accent", theme.bold(title))),
+                            row(theme.bold(title)),
                             row(theme.fg("muted", patch)),
                             ...Array.from({ length: height }, (_, i) => {
                                 const index = scroll.scrollTop + i;
