@@ -15,7 +15,7 @@ import {
 } from "@earendil-works/pi-tui";
 
 const contextStep = 5;
-const bodyStart = 3;
+const bodyStart = 2;
 const maxOutput = 4 * 1024 * 1024;
 const isFileHeader = (line: string) => /^diff --(git|cc|combined) /.test(line);
 const safeText = (text: string) => replaceControlCharacters(text.replaceAll("\t", "    "));
@@ -558,6 +558,7 @@ export default function (pi: ExtensionAPI) {
                             return truncateToWidth(theme.fg("border", "│") + clipped + " ".repeat(Math.max(0, innerWidth - visibleWidth(clipped))) + theme.fg("border", "│"), width, "");
                         };
                         if (help) return [
+                            `Review details · context ${context}${loading || failed ? "" : ` · ${files.length} patches · +${added} −${removed}${limited ? " · PARTIAL" : ""}`}`,
                             "Review keys", "↑↓ / k j   Select line", "u d / Space   Page up/down (Space: down)",
                             "Home End / g G   First/last line", "←→ / h l   Pan", "n N / Tab Shift+Tab   Next/previous file (p: previous)",
                             "[ ]   Previous/next hunk", "+ -   Adjust context", "v   Switch review view",
@@ -567,21 +568,20 @@ export default function (pi: ExtensionAPI) {
                         scroll.updateLayout(rows.length, height, () => tui.requestRender());
                         select(cursor);
                         const file = files.length ? Math.max(0, files.findLastIndex((line) => line <= cursor)) : -1;
-                        const status = loading ? "Loading…" : failed ? "Could not load changes" : `${files.length} patches · `;
-                        let title = theme.fg("accent", ` Diff · ${lastPrompt ? "Last prompt" : "All changes"} · context ${context} · ${status}`);
-                        if (!loading && !failed) {
-                            title += `${theme.fg("toolDiffAdded", `+${added}`)} ${theme.fg("toolDiffRemoved", `−${removed}`)}`;
-                            if (limited) title += theme.fg("accent", " · PARTIAL");
+                        const view = lastPrompt ? "Last prompt" : "All changes";
+                        const prefix = ` ${limited && !loading ? "PARTIAL · " : ""}${view}`;
+                        let title = prefix;
+                        if (loading || failed) title += loading ? " · Loading…" : " · Could not load changes";
+                        else if (file >= 0) {
+                            const count = ` · ${file + 1}/${files.length}`;
+                            const pathWidth = Math.max(0, innerWidth - visibleWidth(prefix + " · " + count));
+                            title += ` · ${truncateToWidth(rows[files[file]].text, pathWidth)}${count}`;
                         }
-                        const patch = !loading && file >= 0
-                            ? ` Patch ${file + 1}/${files.length} · ${rows[files[file]].text}`
-                            : "";
                         const cardWidth = Math.max(1, innerWidth - 3);
                         const body = loading ? [theme.fg("muted", "Loading changes… (Esc to cancel)")] : scroll.render(cardWidth).slice(scroll.scrollTop, scroll.scrollTop + height);
                         return [
                             truncateToWidth(theme.fg("border", "╭" + "─".repeat(innerWidth) + "╮"), width, ""),
-                            row(theme.bold(title)),
-                            row(theme.fg("muted", patch)),
+                            row(theme.fg("accent", theme.bold(title))),
                             ...Array.from({ length: height }, (_, i) => {
                                 const index = scroll.scrollTop + i;
                                 const selected = !loading && index === cursor && !!rows[index]?.location;
