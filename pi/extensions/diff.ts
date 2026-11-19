@@ -467,8 +467,8 @@ export default function (pi: ExtensionAPI) {
                             tui.requestRender();
                             return;
                         }
-                        const close = keybindings.matches(data, "tui.select.cancel") || matchesKey(data, "q");
-                        if (matchesKey(data, "?") || (help && close)) {
+                        const close = matchesKey(data, "q");
+                        if (matchesKey(data, "?") || (help && (close || keybindings.matches(data, "tui.select.cancel")))) {
                             help = !help;
                             tui.requestRender();
                             return;
@@ -544,7 +544,7 @@ export default function (pi: ExtensionAPI) {
                             "Review keys", "↑↓ / k j   Select line", "u d / Space   Page up/down (Space: down)",
                             "Home End / g G   First/last line", "←→ / h l   Pan", "n N / Tab Shift+Tab   Next/previous file (p: previous)",
                             "[ ]   Previous/next hunk", "+ -   Adjust context", "v   Switch review view",
-                            "c   Add/edit comment", "Enter   Submit pending comments to chat", "q / Esc   Close review",
+                            "c   Add/edit comment", "Enter   Submit pending comments to chat", "q   Close review",
                             "? / q / Esc   Back to review",
                         ].map(line => row(` ${line}`));
                         scroll.updateLayout(rows.length, height, () => tui.requestRender());
@@ -560,7 +560,7 @@ export default function (pi: ExtensionAPI) {
                             title += ` · ${truncateToWidth(rows[files[file]].text, pathWidth)}${count}`;
                         }
                         const bodyWidth = Math.max(1, innerWidth - 1);
-                        const body = loading ? [theme.fg("muted", "Loading changes… (Esc to cancel)")] : scroll.render(bodyWidth).slice(scroll.scrollTop, scroll.scrollTop + height);
+                        const body = loading ? [theme.fg("muted", "Loading changes… (q to close)")] : scroll.render(bodyWidth).slice(scroll.scrollTop, scroll.scrollTop + height);
                         return [
                             truncateToWidth(theme.fg("border", "╭" + "─".repeat(innerWidth) + "╮"), width, ""),
                             row(theme.fg("accent", theme.bold(title))),
