@@ -1,5 +1,6 @@
-import { lstat } from "node:fs/promises";
-import { resolve } from "node:path";
+import { copyFile, lstat, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { delimiter, join, resolve, sep } from "node:path";
 import { getLanguageFromPath, highlightCode, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
     Input,
@@ -166,12 +167,42 @@ function restorePosition(before: string[], after: string[], top: number) {
     return fallback;
 }
 
-async function loadDiff(pi: ExtensionAPI, cwd: string, context: number, signal: AbortSignal) {
+type Snapshot = { root: string; dir: string; tree: string; env: string[] };
+const removeTemp = (dir: string) => rm(dir, { recursive: true, force: true });
+
+async function capture(pi: ExtensionAPI, cwd: string, signal?: AbortSignal, baselineDir?: string): Promise<Snapshot> {
+    const git = async (args: string[], env: string[] = []) => {
+        signal?.throwIfAborted();
+        const result = await pi.exec("env", [...env, "git", "-c", "core.hooksPath=/dev/null", "-c", "core.splitIndex=false", "-c", "core.fsmonitor=false", ...args], { cwd, signal, timeout: 15_000, maxBuffer: maxOutput });
+        if (result.code !== 0 || result.killed || result.truncated) throw new Error(result.stderr.trim() || "Could not capture Git snapshot.");
+        return result.stdout.replace(/\r?\n$/, "");
+    };
+    cwd = await git(["rev-parse", "--show-toplevel"]);
+    const gitPath = (name: string) => git(["rev-parse", "--path-format=absolute", "--git-path", name]);
+    const [index, objects] = await Promise.all([gitPath("index"), gitPath("objects")]);
+    const dir = await mkdtemp(join(tmpdir(), "pi-diff-"));
+    try {
+        if (dir.startsWith(cwd.endsWith(sep) ? cwd : cwd + sep)) throw new Error("Snapshot directory must be outside the working tree.");
+        const privateIndex = join(dir, "index");
+        try { await copyFile(index, privateIndex); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } // Unborn repository
+        const env = [`GIT_INDEX_FILE=${privateIndex}`, `GIT_OBJECT_DIRECTORY=${dir}`];
+        const alternates = [baselineDir && JSON.stringify(baselineDir), JSON.stringify(objects), process.env.GIT_ALTERNATE_OBJECT_DIRECTORIES].filter(Boolean).join(delimiter);
+        env.push(`GIT_ALTERNATE_OBJECT_DIRECTORIES=${alternates}`);
+        await git(["add", "-A", "--", "."], env);
+        return { root: cwd, dir, env, tree: await git(["write-tree"], env) };
+    } catch (error) {
+        await removeTemp(dir);
+        throw error;
+    }
+}
+
+async function loadDiff(pi: ExtensionAPI, cwd: string, context: number, signal: AbortSignal, baseline?: Snapshot) {
     let remaining = maxOutput;
     const lines: string[] = [];
-    const git = async (args: string[], allowDifference = false) => {
+    const git = async (args: string[], allowDifference = false, env: string[] = []) => {
         signal.throwIfAborted();
-        const result = await pi.exec("git", ["--no-optional-locks", "-c", "core.quotePath=false", ...args], {
+        const result = await pi.exec("env", [...env, "git", "--no-optional-locks", "-c", "core.quotePath=false", ...args], {
             cwd,
             signal,
             timeout: 15_000,
@@ -179,7 +210,7 @@ async function loadDiff(pi: ExtensionAPI, cwd: string, context: number, signal: 
         });
         signal.throwIfAborted();
         if (!result.truncated && (result.killed || (result.code !== 0 && !(allowDifference && result.code === 1 && !result.stderr)))) {
-            throw new Error(result.killed ? "Git timed out. Retrying automatically." : safeText(result.stderr.trim() || "Git failed."));
+            throw new Error(result.killed ? "Git timed out." : safeText(result.stderr.trim() || "Git failed."));
         }
         return result;
     };
@@ -204,6 +235,15 @@ async function loadDiff(pi: ExtensionAPI, cwd: string, context: number, signal: 
         return true;
     };
 
+    if (baseline) {
+        if (cwd !== baseline.root) throw new Error("The last prompt was in a different repository.");
+        const current = await capture(pi, cwd, signal, baseline.dir);
+        try {
+            append("Last prompt · prompt start → working tree", await git(["diff", ...diffOptions, baseline.tree, current.tree, "--"], false, current.env));
+            if (!lines.length) lines.push("No changes since the last prompt.");
+            return review;
+        } finally { await removeTemp(current.dir); }
+    }
     if (!append("Staged · HEAD → index", await git(["diff", "--cached", ...diffOptions, "--"]))) return review;
     if (!append("Unstaged · index → working tree", await git(["diff", ...diffOptions, "--"]))) return review;
     const untracked = await git(["ls-files", "--others", "--exclude-standard", "-z"]);
@@ -226,8 +266,26 @@ async function loadDiff(pi: ExtensionAPI, cwd: string, context: number, signal: 
 }
 
 export default function (pi: ExtensionAPI) {
+    let baseline: Snapshot | undefined;
+    let unavailable = "No prompt snapshot yet. Send a prompt in this session first.";
+    const clear = async () => {
+        const previous = baseline;
+        baseline = undefined;
+        if (previous) await removeTemp(previous.dir);
+    };
+    pi.on("session_shutdown", clear);
+    pi.on("message_start", async ({ message }, ctx) => {
+        if (message.role !== "user" || ctx.mode !== "tui") return;
+        await clear();
+        try {
+            if (!ctx.isProjectTrusted()) throw new Error("Project is not trusted.");
+            baseline = await capture(pi, ctx.cwd, ctx.signal);
+        } catch (error) {
+            unavailable = `Last prompt snapshot unavailable: ${safeText(String(error))}`;
+        }
+    });
     pi.registerCommand("diff", {
-        description: "Review all uncommitted Git changes in the current repository",
+        description: "Review all uncommitted Git changes or changes since the last prompt",
         handler: async (args, ctx) => {
             if (ctx.mode !== "tui") {
                 ctx.ui.notify("/diff requires interactive Pi.", "error");
@@ -242,6 +300,7 @@ export default function (pi: ExtensionAPI) {
             const review = await ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) => {
                 let lines = ["Loading changes…"];
                 let rows = formatReview(lines);
+                let lastPrompt = false;
                 let context = contextStep;
                 let root = cwd;
                 let cursor = 0;
@@ -339,7 +398,8 @@ export default function (pi: ExtensionAPI) {
                         repaint();
                     }
                     try {
-                        const next = await loadDiff(pi, cwd, context, current.signal);
+                        const next = lastPrompt && !baseline ? { lines: [unavailable], root: cwd }
+                            : await loadDiff(pi, cwd, context, current.signal, lastPrompt ? baseline : undefined);
                         if (closed || current.signal.aborted) return;
                         if (background && !failed && next.root === root && next.lines.length === lines.length &&
                             next.lines.every((line, i) => line === lines[i])) return;
@@ -372,7 +432,7 @@ export default function (pi: ExtensionAPI) {
                         if (closed || current.signal.aborted) return;
                         failed = true;
                         limited = false;
-                        lines = [safeText(error instanceof Error ? error.message : String(error)), "", "Start Pi in a Git repository."];
+                        lines = [safeText(error instanceof Error ? error.message : String(error))];
                         files = [];
                         hunks = [];
                         added = removed = 0;
@@ -385,7 +445,7 @@ export default function (pi: ExtensionAPI) {
                     } finally {
                         if (!closed && controller === current) {
                             loading = false;
-                            poll = setTimeout(() => void refresh(true, true), 2_000);
+                            if (!lastPrompt) poll = setTimeout(() => void refresh(true, true), 2_000);
                         }
                     }
                 };
@@ -436,6 +496,7 @@ export default function (pi: ExtensionAPI) {
                             ].join("\n\n"));
                             return;
                         }
+                        if (matchesKey(data, "v")) { lastPrompt = !lastPrompt; void refresh(); return; }
                         if (loading) return;
                         if (matchesKey(data, "c")) { editComment(); tui.requestRender(); return; }
                         if (matchesKey(data, "+") || matchesKey(data, "-")) {
@@ -446,12 +507,12 @@ export default function (pi: ExtensionAPI) {
                         const previousColumn = column;
                         if (keybindings.matches(data, "tui.select.down") || matchesKey(data, "j")) select(cursor + 1);
                         else if (keybindings.matches(data, "tui.select.up") || matchesKey(data, "k")) select(cursor - 1);
-                        else if (keybindings.matches(data, "tui.select.pageDown") || matchesKey(data, "space")) select(cursor + scroll.viewportHeight);
-                        else if (keybindings.matches(data, "tui.select.pageUp")) select(cursor - scroll.viewportHeight);
+                        else if (matchesKey(data, "d") || matchesKey(data, "space")) select(cursor + scroll.viewportHeight);
+                        else if (matchesKey(data, "u")) select(cursor - scroll.viewportHeight);
                         else if (matchesKey(data, "home") || matchesKey(data, "g")) select(0);
                         else if (matchesKey(data, "end") || matchesKey(data, "shift+g")) select(rows.length - 1);
                         else if (matchesKey(data, "n") || matchesKey(data, "tab")) jump(files, false);
-                        else if (matchesKey(data, "p") || matchesKey(data, "shift+tab")) jump(files, true);
+                        else if (matchesKey(data, "shift+n") || matchesKey(data, "p") || matchesKey(data, "shift+tab")) jump(files, true);
                         else if (matchesKey(data, "]")) jump(hunks, false);
                         else if (matchesKey(data, "[")) jump(hunks, true);
                         else if (matchesKey(data, "right") || matchesKey(data, "l")) column = Math.min(maxColumn, column + 8);
@@ -484,7 +545,7 @@ export default function (pi: ExtensionAPI) {
                             : discard ? ["y: discard", "any other key: keep reviewing"] : [
                                 theme.fg("accent", rows[cursor]?.location && !loading ? "c: add/edit comment" : "Select a source line to comment"),
                                 theme.fg("accent", `Enter: submit to chat (${comments.size})`),
-                                "↑↓/jk select", "n/p file", "PgUp/PgDn page", "←→ pan", "[ ] hunk", "+/- context", "q/Esc close",
+                                `v: ${lastPrompt ? "all changes" : "last prompt"}`, "↑↓/jk select", "n/N next/prev file", "u/d page up/down", "←→ pan", "[ ] hunk", "+/- context", "q/Esc close",
                             ];
                         const footer: string[] = [];
                         for (const hint of hints) {
@@ -502,7 +563,7 @@ export default function (pi: ExtensionAPI) {
                         select(cursor);
                         const file = files.length ? Math.max(0, files.findLastIndex((line) => line <= cursor)) : -1;
                         const status = loading ? "Loading…" : failed ? "Could not load changes" : `${files.length} patches · `;
-                        let title = theme.fg("accent", ` Diff · context ${context} · ${status}`);
+                        let title = theme.fg("accent", ` Diff · ${lastPrompt ? "Last prompt" : "All changes"} · context ${context} · ${status}`);
                         if (!loading && !failed) {
                             title += `${theme.fg("toolDiffAdded", `+${added}`)} ${theme.fg("toolDiffRemoved", `−${removed}`)}`;
                             if (limited) title += theme.fg("accent", " · PARTIAL");
