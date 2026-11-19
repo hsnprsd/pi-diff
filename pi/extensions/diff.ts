@@ -1,6 +1,6 @@
 import { lstat } from "node:fs/promises";
 import { resolve } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getLanguageFromPath, highlightCode, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
     Input,
     matchesKey,
@@ -9,6 +9,7 @@ import {
     sliceByColumn,
     truncateToWidth,
     visibleWidth,
+    wrapTextWithAnsi,
     type TuiMouseEvent,
 } from "@earendil-works/pi-tui";
 
@@ -18,8 +19,10 @@ const maxOutput = 4 * 1024 * 1024;
 const isFileHeader = (line: string) => /^diff --(git|cc|combined) /.test(line);
 const safeText = (text: string) => replaceControlCharacters(text.replaceAll("\t", "    "));
 
+type SourceRow = { row: number; oldLine: number; newLine: number; kind: " " | "+" | "-"; path: string };
+
 // Context changes can merge hunks. Track source lines, not hunk numbers.
-function* sourceRows(lines: string[], file: number) {
+function* sourceRows(lines: string[], file: number): Generator<SourceRow, void> {
     let oldLine = 0, newLine = 0, inHunk = false;
     let oldPath = "", newPath = "";
     for (let row = file + 1; row < lines.length; row++) {
@@ -32,11 +35,103 @@ function* sourceRows(lines: string[], file: number) {
             inHunk = !!range;
             if (range) { oldLine = Number(range[1]); newLine = Number(range[2]); }
         } else if (inHunk && /^[ +\-]/.test(line)) {
-            yield { row, oldLine, newLine, kind: line[0], path: line[0] === "-" ? oldPath : newPath };
+            yield { row, oldLine, newLine, kind: line[0] as SourceRow["kind"], path: line[0] === "-" ? oldPath : newPath };
             if (line[0] !== "+") oldLine++;
             if (line[0] !== "-") newLine++;
         }
     }
+}
+
+type ReviewRow = {
+    raw: number;
+    text: string;
+    kind: "file" | "cardEnd" | "hunk" | "note" | SourceRow["kind"];
+    location?: string;
+    gutter?: string;
+    oldLang?: string;
+    newLang?: string;
+};
+
+function formatReview(lines: string[]) {
+    const rows: ReviewRow[] = [];
+    let section = "", inHunk = false;
+    let oldLang: string | undefined, newLang: string | undefined;
+    let source: ReturnType<typeof sourceRows> | undefined;
+    let anchor: SourceRow | void = undefined;
+    const closeCard = () => {
+        if (!source) return;
+        rows.push({ raw: rows[rows.length - 1].raw, kind: "cardEnd", text: "" });
+        source = undefined;
+    };
+    for (const [raw, line] of lines.entries()) {
+        let text = line, kind: ReviewRow["kind"] = "note";
+        if (!line && /^(──|Review truncated|Untracked file list)/.test(lines[raw + 1] ?? "")) closeCard();
+        if (isFileHeader(line)) {
+            closeCard();
+            kind = "file";
+            inHunk = false;
+            oldLang = newLang = undefined;
+            text = line.replace(/^diff --(?:git|cc|combined) /, "");
+            // Metadata-only patches have no ---/+++ paths. For the common
+            // same-path header, match both halves (paths may contain spaces).
+            const samePath = /^a\/(.+) b\/\1$/.exec(text);
+            text = samePath?.[1] ?? text.replace(/^a\/(.+) b\/(.+)$/, "$1 → $2");
+            if (section === "Staged" || section === "Untracked") text += ` · ${section}`;
+            source = sourceRows(lines, raw);
+            anchor = source.next().value;
+        } else if (line.startsWith("──")) {
+            section = line.slice(3).split(" · ")[0];
+            inHunk = false;
+            continue;
+        } else if (line.startsWith("@@")) {
+            kind = "hunk";
+            inHunk = true;
+            text = line.replace(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@\s*(.*)$/, (_, old, next, scope) =>
+                `Lines ${old} → ${next}${scope ? `  ·  ${scope}` : ""}`);
+        } else if (!inHunk && /^(index |--- |\+\+\+ )/.test(line)) {
+            if (line.startsWith("--- ")) oldLang = getLanguageFromPath(line.slice(4).trimEnd());
+            if (line.startsWith("+++ ")) newLang = getLanguageFromPath(line.slice(4).trimEnd());
+            continue;
+        } else if (source && anchor && anchor.row === raw) {
+            const { oldLine, newLine, path, kind } = anchor;
+            const old = kind === "-", number = old ? oldLine : newLine;
+            const location = `${path.replace(/^[ab]\//, "")}:${number} (${section}, ${old ? "old" : "new"})`;
+            rows.push({ raw, kind, text: line.slice(1), gutter: `${String(number).padStart(4)} │ ${kind} `, location });
+            anchor = source.next().value;
+            continue;
+        } else if (line.startsWith("Binary files ")) text = "Binary contents differ";
+        else if (line.startsWith("\\ No newline")) text = line.slice(2);
+        if (text || rows.length) rows.push(kind === "hunk" ? { raw, text, kind, oldLang, newLang } : { raw, text, kind });
+    }
+    closeCard();
+    return rows;
+}
+
+// Each side is a separate source fragment. Context participates in both parses,
+// but is displayed using the new side's syntax (and line number).
+function highlightHunks(rows: ReviewRow[]) {
+    const colored = new Map<number, string>();
+    for (let i = 0; i < rows.length; i++) {
+        const hunk = rows[i];
+        if (hunk.kind !== "hunk" || (!hunk.oldLang && !hunk.newLang)) continue;
+        let end = i + 1;
+        while (end < rows.length && rows[end].kind !== "hunk" && rows[end].kind !== "cardEnd") end++;
+        const source = rows.slice(i + 1, end).filter(row => row.gutter);
+        for (const old of [false, true]) {
+            const lang = old ? hunk.oldLang : hunk.newLang;
+            if (!lang || (old && !source.some(row => row.kind === "-"))) continue;
+            const side = source.filter(row => row.kind !== (old ? "+" : "-"));
+            // Keep generated files and minified bundles from blocking the overlay.
+            if (!side.length || side.reduce((n, row) => n + row.text.length + 1, 0) > 64 * 1024) continue;
+            const code = side.map(row => row.text).join("\n");
+            const highlighted = wrapTextWithAnsi(highlightCode(code, lang).join("\n"), Infinity);
+            side.forEach((row, index) => {
+                if (!old || row.kind === "-") colored.set(row.raw, highlighted[index]);
+            });
+        }
+        i = end - 1;
+    }
+    return colored;
 }
 
 function restorePosition(before: string[], after: string[], top: number) {
@@ -146,15 +241,17 @@ export default function (pi: ExtensionAPI) {
 
             const review = await ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) => {
                 let lines = ["Loading changes…"];
+                let rows = formatReview(lines);
                 let context = contextStep;
                 let root = cwd;
                 let cursor = 0;
+                let firstSource = -1, lastSource = -1;
                 let focused = false;
                 let input: Input | undefined;
                 let discard = false;
-                const locations = new Map<number, string>();
+                const snippetAt = (row: number) => lines[rows[row]?.raw];
                 const comments = new Map<string, { location: string; snippet: string; text: string }>();
-                const keyFor = (row: number) => locations.get(row) + "\0" + lines[row];
+                const keyFor = (row: number) => rows[row]?.location + "\0" + snippetAt(row);
                 let files: number[] = [];
                 let hunks: number[] = [];
                 let loading = false;
@@ -168,34 +265,58 @@ export default function (pi: ExtensionAPI) {
                 let cachedWidth = 0;
                 let added = 0;
                 let removed = 0;
-                const invalidate = () => { cached = undefined; };
+                let syntax: Map<number, string> | undefined;
+                const invalidate = () => { cached = syntax = undefined; };
                 const repaint = () => { invalidate(); tui.requestRender(); };
                 const content = {
                     invalidate,
                     render(width: number) {
                         if (cached && cachedWidth === width) return cached;
                         cachedWidth = width;
-                        cached = lines.map((line) => {
-                            const text = sliceByColumn(line, column, width, true);
-                            if (isFileHeader(line) || line.startsWith("──")) return theme.fg("accent", theme.bold(text));
-                            if (line.startsWith("@@")) return theme.fg("accent", text);
-                            if (line.startsWith("+")) return theme.fg("toolDiffAdded", text);
-                            if (line.startsWith("-")) return theme.fg("toolDiffRemoved", text);
-                            return theme.fg("toolDiffContext", text);
+                        let inCard = false;
+                        const border = (text: string) => theme.fg("border", text);
+                        const inside = Math.max(0, width - 2);
+                        syntax ??= highlightHunks(rows);
+                        cached = rows.map(({ kind, text, raw, gutter }) => {
+                            if (kind === "file") inCard = true;
+                            if (kind === "cardEnd") {
+                                inCard = false;
+                                return border(width < 2 ? "╰" : `╰${"─".repeat(inside)}╯`);
+                            }
+                            if (!inCard) return sliceByColumn(text, column, width, true);
+                            const heading = kind === "file";
+                            if (width < 2) return border(heading ? "╭" : "│");
+                            const fg = kind === "+" ? "toolDiffAdded" : kind === "-" ? "toolDiffRemoved" : "toolDiffContext";
+                            const content = gutter ? theme.fg(fg, gutter) + (syntax?.get(raw) ?? text) : text;
+                            const value = heading ? truncateToWidth(`─ ${text} `, inside)
+                                : inside > 0 ? " " + sliceByColumn(content, column, inside - 1, true) : "";
+                            const padding = Math.max(0, inside - visibleWidth(value));
+                            if (heading) return border("╭") + theme.fg("accent", theme.bold(value)) + border("─".repeat(padding) + "╮");
+                            const body = value + " ".repeat(padding);
+                            const styled = kind === "+" ? theme.bg("toolSuccessBg", body)
+                                : kind === "-" ? theme.bg("toolErrorBg", body)
+                                : kind === "hunk" ? theme.fg("muted", body) : body;
+                            return border("│") + styled + "\x1b[0m" + border("│");
                         });
                         return cached;
                     },
                 };
                 const scroll = new ScrollView(content, { overscroll: "contain" });
-                const select = (row: number) => {
-                    cursor = Math.max(0, Math.min(row, lines.length - 1));
+                const select = (row: number, direction = row < cursor ? -1 : 1) => {
+                    if (firstSource >= 0) {
+                        cursor = Math.max(firstSource, Math.min(row, lastSource));
+                        while (!rows[cursor].location) cursor += direction;
+                    } else {
+                        // No selectable lines (e.g. binary-only patches). Keep scrolling available.
+                        cursor = Math.max(0, Math.min(row, rows.length - 1));
+                    }
                     if (cursor < scroll.scrollTop) scroll.scrollTo(cursor);
                     else if (cursor >= scroll.scrollTop + scroll.viewportHeight) scroll.scrollTo(cursor - scroll.viewportHeight + 1);
                 };
                 const editComment = () => {
-                    const location = locations.get(cursor);
+                    const location = rows[cursor]?.location;
                     if (!location) return;
-                    const key = keyFor(cursor), snippet = lines[cursor];
+                    const key = keyFor(cursor), snippet = snippetAt(cursor);
                     input = new Input({ prompt: "Comment: " });
                     input.focused = focused;
                     input.setValue(comments.get(key)?.text ?? "");
@@ -224,35 +345,27 @@ export default function (pi: ExtensionAPI) {
                             next.lines.every((line, i) => line === lines[i])) return;
                         failed = false;
                         const offset = cursor - scroll.scrollTop;
-                        const selected = keepPosition ? restorePosition(lines, next.lines, cursor) : 0;
+                        const anchor = keepPosition ? restorePosition(lines, next.lines, rows[cursor].raw) : 0;
                         lines = next.lines;
+                        rows = formatReview(lines);
+                        firstSource = rows.findIndex(row => !!row.location);
+                        lastSource = rows.findLastIndex(row => !!row.location);
+                        const selected = Math.max(0, rows.findLastIndex(row => row.raw <= anchor && row.kind !== "cardEnd"));
                         root = next.root;
-                        scroll.updateLayout(lines.length, scroll.viewportHeight, () => tui.requestRender());
+                        scroll.updateLayout(rows.length, scroll.viewportHeight, () => tui.requestRender());
                         scroll.scrollTo(keepPosition ? selected - offset : 0);
-                        select(selected);
-                        locations.clear();
+                        select(selected, 1);
                         files = [];
                         hunks = [];
                         added = removed = 0;
-                        let section = "", inHunk = false;
-                        lines.forEach((line, i) => {
-                            if (isFileHeader(line)) {
-                                files.push(i);
-                                inHunk = false;
-                                for (const anchor of sourceRows(lines, i)) {
-                                    const old = anchor.kind === "-";
-                                    const path = anchor.path.replace(/^[ab]\//, "");
-                                    locations.set(anchor.row, `${path}:${old ? anchor.oldLine : anchor.newLine} (${section}, ${old ? "old" : "new"})`);
-                                }
-                            } else if (line.startsWith("──")) {
-                                section = line.slice(3).split(" · ")[0];
-                                inHunk = false;
-                            } else if (line.startsWith("@@")) { hunks.push(i); inHunk = true; }
-                            else if (inHunk && line.startsWith("+")) added++;
-                            else if (inHunk && line.startsWith("-")) removed++;
+                        rows.forEach(({ kind }, i) => {
+                            if (kind === "file") files.push(i);
+                            else if (kind === "hunk") hunks.push(i);
+                            else if (kind === "+") added++;
+                            else if (kind === "-") removed++;
                         });
                         limited = lines.some((line) => /^(Review truncated|Untracked file list)/.test(line));
-                        maxColumn = lines.reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
+                        maxColumn = rows.reduce((max, row) => Math.max(max, (row.gutter?.length ?? 0) + visibleWidth(row.text)), 0);
                         column = keepPosition ? Math.min(column, maxColumn) : 0;
                         repaint();
                     } catch (error) {
@@ -263,8 +376,9 @@ export default function (pi: ExtensionAPI) {
                         files = [];
                         hunks = [];
                         added = removed = 0;
+                        firstSource = lastSource = -1;
                         maxColumn = cursor = 0;
-                        locations.clear();
+                        rows = formatReview(lines);
                         scroll.scrollToStart();
                         column = 0;
                         repaint();
@@ -276,10 +390,20 @@ export default function (pi: ExtensionAPI) {
                     }
                 };
                 const jump = (positions: number[], backwards: boolean) => {
-                    const position = backwards
-                        ? positions.findLast((line) => line < cursor)
-                        : positions.find((line) => line > cursor);
-                    if (position !== undefined) { scroll.scrollTo(position); select(position); }
+                    const step = backwards ? -1 : 1;
+                    const current = positions.findLastIndex(row => row <= cursor);
+                    for (let i = current + step; i >= 0 && i < positions.length; i += step) {
+                        const header = positions[i];
+                        let target = header;
+                        if (firstSource >= 0) {
+                            const end = positions[i + 1] ?? rows.length;
+                            while (target < end && !rows[target].location) target++;
+                            if (target === end) continue;
+                        }
+                        scroll.scrollTo(header);
+                        select(target);
+                        break;
+                    }
                 };
                 void refresh();
 
@@ -325,20 +449,22 @@ export default function (pi: ExtensionAPI) {
                         else if (keybindings.matches(data, "tui.select.pageDown") || matchesKey(data, "space")) select(cursor + scroll.viewportHeight);
                         else if (keybindings.matches(data, "tui.select.pageUp")) select(cursor - scroll.viewportHeight);
                         else if (matchesKey(data, "home") || matchesKey(data, "g")) select(0);
-                        else if (matchesKey(data, "end") || matchesKey(data, "shift+g")) select(lines.length - 1);
+                        else if (matchesKey(data, "end") || matchesKey(data, "shift+g")) select(rows.length - 1);
                         else if (matchesKey(data, "n") || matchesKey(data, "tab")) jump(files, false);
                         else if (matchesKey(data, "p") || matchesKey(data, "shift+tab")) jump(files, true);
                         else if (matchesKey(data, "]")) jump(hunks, false);
                         else if (matchesKey(data, "[")) jump(hunks, true);
                         else if (matchesKey(data, "right") || matchesKey(data, "l")) column = Math.min(maxColumn, column + 8);
                         else if (matchesKey(data, "left") || matchesKey(data, "h")) column = Math.max(0, column - 8);
-                        if (column !== previousColumn) invalidate();
+                        if (column !== previousColumn) cached = undefined;
                         tui.requestRender();
                     },
                     handleMouse(event: TuiMouseEvent) {
                         if (input || discard || loading) return undefined;
-                        if (event.type === "press" && event.button === "left" && event.y >= bodyStart && event.y < bodyStart + scroll.viewportHeight) {
-                            select(scroll.scrollTop + event.y - bodyStart);
+                        const y = event.y - bodyStart;
+                        if (event.type === "press" && event.button === "left" && y >= 0 && y < scroll.viewportHeight) {
+                            const row = scroll.scrollTop + y;
+                            if (rows[row]?.location) select(row);
                             tui.requestRender();
                             return { handled: true };
                         }
@@ -356,7 +482,7 @@ export default function (pi: ExtensionAPI) {
                         const hints = input
                             ? ["Enter: save comment", "Esc: cancel edit", "save empty to remove"]
                             : discard ? ["y: discard", "any other key: keep reviewing"] : [
-                                theme.fg("accent", locations.has(cursor) && !loading ? "c: add/edit comment" : "Select a source line to comment"),
+                                theme.fg("accent", rows[cursor]?.location && !loading ? "c: add/edit comment" : "Select a source line to comment"),
                                 theme.fg("accent", `Enter: submit to chat (${comments.size})`),
                                 "↑↓/jk select", "n/p file", "PgUp/PgDn page", "←→ pan", "[ ] hunk", "+/- context", "q/Esc close",
                             ];
@@ -372,7 +498,7 @@ export default function (pi: ExtensionAPI) {
                             const clipped = truncateToWidth(text, innerWidth, "");
                             return truncateToWidth(theme.fg("border", "│") + clipped + " ".repeat(Math.max(0, innerWidth - visibleWidth(clipped))) + theme.fg("border", "│"), width, "");
                         };
-                        scroll.updateLayout(lines.length, height, () => tui.requestRender());
+                        scroll.updateLayout(rows.length, height, () => tui.requestRender());
                         select(cursor);
                         const file = files.length ? Math.max(0, files.findLastIndex((line) => line <= cursor)) : -1;
                         const status = loading ? "Loading…" : failed ? "Could not load changes" : `${files.length} patches · `;
@@ -382,16 +508,18 @@ export default function (pi: ExtensionAPI) {
                             if (limited) title += theme.fg("accent", " · PARTIAL");
                         }
                         const patch = !loading && file >= 0
-                            ? ` Patch ${file + 1}/${files.length} · ${lines[files[file]].replace(/^diff --(git|cc|combined) /, "")}`
+                            ? ` Patch ${file + 1}/${files.length} · ${rows[files[file]].text}`
                             : "";
-                        const body = loading ? [theme.fg("muted", "Loading changes… (Esc to cancel)")] : scroll.render(Math.max(1, innerWidth - 2)).slice(scroll.scrollTop, scroll.scrollTop + height);
+                        const cardWidth = Math.max(1, innerWidth - 3);
+                        const body = loading ? [theme.fg("muted", "Loading changes… (Esc to cancel)")] : scroll.render(cardWidth).slice(scroll.scrollTop, scroll.scrollTop + height);
                         return [
                             truncateToWidth(theme.fg("border", "╭" + "─".repeat(innerWidth) + "╮"), width, ""),
                             row(theme.bold(title)),
                             row(theme.fg("muted", patch)),
                             ...Array.from({ length: height }, (_, i) => {
                                 const index = scroll.scrollTop + i;
-                                const marker = (index === cursor ? "›" : " ") + (comments.has(keyFor(index)) ? "*" : " ");
+                                const selected = !loading && index === cursor && !!rows[index]?.location;
+                                const marker = (selected ? "▶" : " ") + (comments.has(keyFor(index)) ? "*" : " ");
                                 return row(theme.fg("accent", marker) + (body[i] ?? ""));
                             }),
                             ...(input ? [row(input.render(Math.max(1, innerWidth))[0])] : discard
