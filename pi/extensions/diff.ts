@@ -308,6 +308,7 @@ export default function (pi: ExtensionAPI) {
                 let focused = false;
                 let input: Input | undefined;
                 let discard = false;
+                let help = false;
                 const snippetAt = (row: number) => lines[rows[row]?.raw];
                 const comments = new Map<string, { location: string; snippet: string; text: string }>();
                 const keyFor = (row: number) => rows[row]?.location + "\0" + snippetAt(row);
@@ -484,7 +485,14 @@ export default function (pi: ExtensionAPI) {
                             tui.requestRender();
                             return;
                         }
-                        if (keybindings.matches(data, "tui.select.cancel") || matchesKey(data, "q")) {
+                        const close = keybindings.matches(data, "tui.select.cancel") || matchesKey(data, "q");
+                        if (matchesKey(data, "?") || (help && close)) {
+                            help = !help;
+                            tui.requestRender();
+                            return;
+                        }
+                        if (help) return;
+                        if (close) {
                             if (!comments.size) done(undefined);
                             else { discard = true; tui.requestRender(); }
                             return;
@@ -521,7 +529,7 @@ export default function (pi: ExtensionAPI) {
                         tui.requestRender();
                     },
                     handleMouse(event: TuiMouseEvent) {
-                        if (input || discard || loading) return undefined;
+                        if (help || input || discard || loading) return undefined;
                         const y = event.y - bodyStart;
                         if (event.type === "press" && event.button === "left" && y >= 0 && y < scroll.viewportHeight) {
                             const row = scroll.scrollTop + y;
@@ -540,25 +548,22 @@ export default function (pi: ExtensionAPI) {
                     },
                     render(width: number) {
                         const innerWidth = Math.max(0, width - 2);
-                        const hints = input
-                            ? ["Enter: save comment", "Esc: cancel edit", "save empty to remove"]
-                            : discard ? ["y: discard", "any other key: keep reviewing"] : [
-                                theme.fg("accent", rows[cursor]?.location && !loading ? "c: add/edit comment" : "Select a source line to comment"),
-                                theme.fg("accent", `Enter: submit to chat (${comments.size})`),
-                                `v: ${lastPrompt ? "all changes" : "last prompt"}`, "↑↓/jk select", "n/N next/prev file", "u/d page up/down", "←→ pan", "[ ] hunk", "+/- context", "q/Esc close",
-                            ];
-                        const footer: string[] = [];
-                        for (const hint of hints) {
-                            const last = footer.length - 1;
-                            const joined = `${footer[last]} · ${hint}`;
-                            if (last >= 0 && visibleWidth(joined) <= innerWidth) footer[last] = joined;
-                            else footer.push(` ${hint}`);
-                        }
-                        const height = Math.max(1, tui.terminal.rows - bodyStart - 3 - footer.length - Number(!!input || discard));
+                        const footer = input ? "Enter save · Esc cancel · save empty to remove"
+                            : discard ? "y discard · any other key keep reviewing"
+                            : ["? keys", "q close", !loading && rows[cursor]?.location && "c comment",
+                                comments.size > 0 && `Enter submit (${comments.size})`].filter(Boolean).join(" · ");
+                        const height = Math.max(1, tui.terminal.rows - bodyStart - 4 - Number(!!input || discard));
                         const row = (text: string) => {
                             const clipped = truncateToWidth(text, innerWidth, "");
                             return truncateToWidth(theme.fg("border", "│") + clipped + " ".repeat(Math.max(0, innerWidth - visibleWidth(clipped))) + theme.fg("border", "│"), width, "");
                         };
+                        if (help) return [
+                            "Review keys", "↑↓ / k j   Select line", "u d / Space   Page up/down (Space: down)",
+                            "Home End / g G   First/last line", "←→ / h l   Pan", "n N / Tab Shift+Tab   Next/previous file (p: previous)",
+                            "[ ]   Previous/next hunk", "+ -   Adjust context", "v   Switch review view",
+                            "c   Add/edit comment", "Enter   Submit pending comments to chat", "q / Esc   Close review",
+                            "? / q / Esc   Back to review",
+                        ].map(line => row(` ${line}`));
                         scroll.updateLayout(rows.length, height, () => tui.requestRender());
                         select(cursor);
                         const file = files.length ? Math.max(0, files.findLastIndex((line) => line <= cursor)) : -1;
@@ -585,7 +590,7 @@ export default function (pi: ExtensionAPI) {
                             }),
                             ...(input ? [row(input.render(Math.max(1, innerWidth))[0])] : discard
                                 ? [row(theme.fg("accent", ` Discard ${comments.size} pending comment(s)?`))] : []),
-                            ...footer.map((line) => row(theme.fg("muted", line))),
+                            row(theme.fg("muted", ` ${footer}`)),
                             truncateToWidth(theme.fg("border", "╰" + "─".repeat(innerWidth) + "╯"), width, ""),
                         ];
                     },
