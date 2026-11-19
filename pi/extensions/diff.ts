@@ -48,7 +48,7 @@ type ReviewRow = {
     text: string;
     kind: "file" | "hunk" | "note" | SourceRow["kind"];
     location?: string;
-    gutter?: string;
+    lineNumber?: string;
     oldLang?: string;
     newLang?: string;
 };
@@ -91,7 +91,7 @@ function formatReview(lines: string[]) {
             const { oldLine, newLine, path, kind } = anchor;
             const old = kind === "-", number = old ? oldLine : newLine;
             const location = `${path.replace(/^[ab]\//, "")}:${number} (${section}, ${old ? "old" : "new"})`;
-            rows.push({ raw, kind, text: line.slice(1), gutter: `${String(number).padStart(4)} │ ${kind} `, location });
+            rows.push({ raw, kind, text: line.slice(1), lineNumber: String(number).padStart(4), location });
             anchor = source.next().value;
             continue;
         } else if (line.startsWith("Binary files ")) text = "Binary contents differ";
@@ -110,7 +110,7 @@ function highlightHunks(rows: ReviewRow[]) {
         if (hunk.kind !== "hunk" || (!hunk.oldLang && !hunk.newLang)) continue;
         let end = i + 1;
         while (end < rows.length && rows[end].kind !== "hunk" && rows[end].kind !== "file") end++;
-        const source = rows.slice(i + 1, end).filter(row => row.gutter);
+        const source = rows.slice(i + 1, end).filter(row => row.lineNumber);
         for (const old of [false, true]) {
             const lang = old ? hunk.oldLang : hunk.newLang;
             if (!lang || (old && !source.some(row => row.kind === "-"))) continue;
@@ -327,13 +327,13 @@ export default function (pi: ExtensionAPI) {
                         if (cached && cachedWidth === width) return cached;
                         cachedWidth = width;
                         syntax ??= highlightHunks(rows);
-                        cached = rows.map(({ kind, text, raw, gutter }) => {
+                        cached = rows.map(({ kind, text, raw, lineNumber }) => {
                             if (kind === "file") {
                                 const label = truncateToWidth(`─ ${text} `, width);
                                 return theme.fg("accent", label) + theme.fg("border", "─".repeat(width - visibleWidth(label)));
                             }
                             const fg = kind === "+" ? "toolDiffAdded" : kind === "-" ? "toolDiffRemoved" : "toolDiffContext";
-                            const content = gutter ? theme.fg(fg, gutter) + (syntax?.get(raw) ?? text) : text;
+                            const content = lineNumber ? theme.fg("muted", lineNumber) + theme.fg(fg, ` ${kind} `) + (syntax?.get(raw) ?? text) : text;
                             const value = sliceByColumn(content, column, width, true);
                             const body = value + " ".repeat(Math.max(0, width - visibleWidth(value)));
                             return kind === "+" ? theme.bg("toolSuccessBg", body)
@@ -408,7 +408,7 @@ export default function (pi: ExtensionAPI) {
                             else if (kind === "-") removed++;
                         });
                         limited = lines.some((line) => /^(Review truncated|Untracked file list)/.test(line));
-                        maxColumn = rows.reduce((max, row) => Math.max(max, (row.gutter?.length ?? 0) + visibleWidth(row.text)), 0);
+                        maxColumn = rows.reduce((max, row) => Math.max(max, (row.lineNumber ? row.lineNumber.length + 3 : 0) + visibleWidth(row.text)), 0);
                         column = keepPosition ? Math.min(column, maxColumn) : 0;
                         repaint();
                     } catch (error) {
@@ -559,7 +559,7 @@ export default function (pi: ExtensionAPI) {
                             const pathWidth = Math.max(0, innerWidth - visibleWidth(prefix + " · " + count));
                             title += ` · ${truncateToWidth(rows[files[file]].text, pathWidth)}${count}`;
                         }
-                        const bodyWidth = Math.max(1, innerWidth - 2);
+                        const bodyWidth = Math.max(1, innerWidth - 1);
                         const body = loading ? [theme.fg("muted", "Loading changes… (Esc to cancel)")] : scroll.render(bodyWidth).slice(scroll.scrollTop, scroll.scrollTop + height);
                         return [
                             truncateToWidth(theme.fg("border", "╭" + "─".repeat(innerWidth) + "╮"), width, ""),
@@ -567,8 +567,10 @@ export default function (pi: ExtensionAPI) {
                             ...Array.from({ length: height }, (_, i) => {
                                 const index = scroll.scrollTop + i;
                                 const selected = !loading && index === cursor && !!rows[index]?.location;
-                                const marker = (selected ? "▶" : " ") + (comments.has(keyFor(index)) ? "*" : " ");
-                                return row(theme.fg("accent", marker) + (body[i] ?? ""));
+                                const commented = !loading && comments.has(keyFor(index));
+                                const marker = commented ? "*" : selected ? "▶" : " ";
+                                const styled = selected ? theme.fg("accent", theme.bold(marker)) : theme.fg("muted", marker);
+                                return row(styled + (body[i] ?? ""));
                             }),
                             ...(input ? [row(input.render(Math.max(1, innerWidth))[0])] : discard
                                 ? [row(theme.fg("accent", ` Discard ${comments.size} pending comment(s)?`))] : []),
