@@ -46,7 +46,7 @@ function* sourceRows(lines: string[], file: number): Generator<SourceRow, void> 
 type ReviewRow = {
     raw: number;
     text: string;
-    kind: "file" | "cardEnd" | "hunk" | "note" | SourceRow["kind"];
+    kind: "file" | "hunk" | "note" | SourceRow["kind"];
     location?: string;
     gutter?: string;
     oldLang?: string;
@@ -59,16 +59,10 @@ function formatReview(lines: string[]) {
     let oldLang: string | undefined, newLang: string | undefined;
     let source: ReturnType<typeof sourceRows> | undefined;
     let anchor: SourceRow | void = undefined;
-    const closeCard = () => {
-        if (!source) return;
-        rows.push({ raw: rows[rows.length - 1].raw, kind: "cardEnd", text: "" });
-        source = undefined;
-    };
     for (const [raw, line] of lines.entries()) {
         let text = line, kind: ReviewRow["kind"] = "note";
-        if (!line && /^(──|Review truncated|Untracked file list)/.test(lines[raw + 1] ?? "")) closeCard();
+        if (!line && /^(──|Review truncated|Untracked file list)/.test(lines[raw + 1] ?? "")) continue;
         if (isFileHeader(line)) {
-            closeCard();
             kind = "file";
             inHunk = false;
             oldLang = newLang = undefined;
@@ -104,7 +98,6 @@ function formatReview(lines: string[]) {
         else if (line.startsWith("\\ No newline")) text = line.slice(2);
         if (text || rows.length) rows.push(kind === "hunk" ? { raw, text, kind, oldLang, newLang } : { raw, text, kind });
     }
-    closeCard();
     return rows;
 }
 
@@ -116,7 +109,7 @@ function highlightHunks(rows: ReviewRow[]) {
         const hunk = rows[i];
         if (hunk.kind !== "hunk" || (!hunk.oldLang && !hunk.newLang)) continue;
         let end = i + 1;
-        while (end < rows.length && rows[end].kind !== "hunk" && rows[end].kind !== "cardEnd") end++;
+        while (end < rows.length && rows[end].kind !== "hunk" && rows[end].kind !== "file") end++;
         const source = rows.slice(i + 1, end).filter(row => row.gutter);
         for (const old of [false, true]) {
             const lang = old ? hunk.oldLang : hunk.newLang;
@@ -333,30 +326,19 @@ export default function (pi: ExtensionAPI) {
                     render(width: number) {
                         if (cached && cachedWidth === width) return cached;
                         cachedWidth = width;
-                        let inCard = false;
-                        const border = (text: string) => theme.fg("border", text);
-                        const inside = Math.max(0, width - 2);
                         syntax ??= highlightHunks(rows);
                         cached = rows.map(({ kind, text, raw, gutter }) => {
-                            if (kind === "file") inCard = true;
-                            if (kind === "cardEnd") {
-                                inCard = false;
-                                return border(width < 2 ? "╰" : `╰${"─".repeat(inside)}╯`);
+                            if (kind === "file") {
+                                const label = truncateToWidth(`─ ${text} `, width);
+                                return theme.fg("accent", label) + theme.fg("border", "─".repeat(width - visibleWidth(label)));
                             }
-                            if (!inCard) return sliceByColumn(text, column, width, true);
-                            const heading = kind === "file";
-                            if (width < 2) return border(heading ? "╭" : "│");
                             const fg = kind === "+" ? "toolDiffAdded" : kind === "-" ? "toolDiffRemoved" : "toolDiffContext";
                             const content = gutter ? theme.fg(fg, gutter) + (syntax?.get(raw) ?? text) : text;
-                            const value = heading ? truncateToWidth(`─ ${text} `, inside)
-                                : inside > 0 ? " " + sliceByColumn(content, column, inside - 1, true) : "";
-                            const padding = Math.max(0, inside - visibleWidth(value));
-                            if (heading) return border("╭") + theme.fg("accent", theme.bold(value)) + border("─".repeat(padding) + "╮");
-                            const body = value + " ".repeat(padding);
-                            const styled = kind === "+" ? theme.bg("toolSuccessBg", body)
+                            const value = sliceByColumn(content, column, width, true);
+                            const body = value + " ".repeat(Math.max(0, width - visibleWidth(value)));
+                            return kind === "+" ? theme.bg("toolSuccessBg", body)
                                 : kind === "-" ? theme.bg("toolErrorBg", body)
                                 : kind === "hunk" ? theme.fg("muted", body) : body;
-                            return border("│") + styled + "\x1b[0m" + border("│");
                         });
                         return cached;
                     },
@@ -411,7 +393,7 @@ export default function (pi: ExtensionAPI) {
                         rows = formatReview(lines);
                         firstSource = rows.findIndex(row => !!row.location);
                         lastSource = rows.findLastIndex(row => !!row.location);
-                        const selected = Math.max(0, rows.findLastIndex(row => row.raw <= anchor && row.kind !== "cardEnd"));
+                        const selected = Math.max(0, rows.findLastIndex(row => row.raw <= anchor));
                         root = next.root;
                         scroll.updateLayout(rows.length, scroll.viewportHeight, () => tui.requestRender());
                         scroll.scrollTo(keepPosition ? selected - offset : 0);
@@ -577,8 +559,8 @@ export default function (pi: ExtensionAPI) {
                             const pathWidth = Math.max(0, innerWidth - visibleWidth(prefix + " · " + count));
                             title += ` · ${truncateToWidth(rows[files[file]].text, pathWidth)}${count}`;
                         }
-                        const cardWidth = Math.max(1, innerWidth - 3);
-                        const body = loading ? [theme.fg("muted", "Loading changes… (Esc to cancel)")] : scroll.render(cardWidth).slice(scroll.scrollTop, scroll.scrollTop + height);
+                        const bodyWidth = Math.max(1, innerWidth - 2);
+                        const body = loading ? [theme.fg("muted", "Loading changes… (Esc to cancel)")] : scroll.render(bodyWidth).slice(scroll.scrollTop, scroll.scrollTop + height);
                         return [
                             truncateToWidth(theme.fg("border", "╭" + "─".repeat(innerWidth) + "╮"), width, ""),
                             row(theme.fg("accent", theme.bold(title))),
