@@ -467,8 +467,8 @@ export default function (pi: ExtensionAPI) {
                             tui.requestRender();
                             return;
                         }
-                        const close = matchesKey(data, "q");
-                        if (matchesKey(data, "?") || (help && (close || keybindings.matches(data, "tui.select.cancel")))) {
+                        const close = matchesKey(data, "q") || keybindings.matches(data, "tui.select.cancel");
+                        if (matchesKey(data, "?") || (help && close)) {
                             help = !help;
                             tui.requestRender();
                             return;
@@ -532,7 +532,7 @@ export default function (pi: ExtensionAPI) {
                         const innerWidth = Math.max(0, width - 2);
                         const footer = input ? "Enter save · Esc cancel · save empty to remove"
                             : discard ? "y discard · any other key keep reviewing"
-                            : ["? keys", "q close", !loading && rows[cursor]?.location && "c comment",
+                            : ["? keys", "q/Esc close", !loading && rows[cursor]?.location && "c comment",
                                 comments.size > 0 && `Enter submit (${comments.size})`].filter(Boolean).join(" · ");
                         const height = Math.max(1, tui.terminal.rows - bodyStart - 4 - Number(!!input || discard));
                         const row = (text: string) => {
@@ -544,7 +544,7 @@ export default function (pi: ExtensionAPI) {
                             "Review keys", "↑↓ / k j   Select line", "PgUp PgDown / u d   Page up/down",
                             "Home End / g G   First/last line", "←→ / h l   Pan", "n N / Tab Shift+Tab   Next/previous file (p: previous)",
                             "[ ]   Previous/next hunk", "+ -   Adjust context", "v   Switch review view",
-                            "c   Add/edit comment", "Enter   Submit pending comments to chat", "q   Close review",
+                            "c   Add/edit comment", "Enter   Submit pending comments to chat", "q / Esc   Close review",
                             "? / q / Esc   Back to review",
                         ].map(line => row(` ${line}`));
                         scroll.updateLayout(rows.length, height, () => tui.requestRender());
@@ -560,7 +560,7 @@ export default function (pi: ExtensionAPI) {
                             title += ` · ${truncateToWidth(rows[files[file]].text, pathWidth)}${count}`;
                         }
                         const bodyWidth = Math.max(1, innerWidth - 1);
-                        const body = loading ? [theme.fg("muted", "Loading changes… (q to close)")] : scroll.render(bodyWidth).slice(scroll.scrollTop, scroll.scrollTop + height);
+                        const body = loading ? [theme.fg("muted", "Loading changes… (q/Esc to close)")] : scroll.render(bodyWidth).slice(scroll.scrollTop, scroll.scrollTop + height);
                         return [
                             truncateToWidth(theme.fg("border", "╭" + "─".repeat(innerWidth) + "╮"), width, ""),
                             row(theme.fg("accent", theme.bold(title))),
