@@ -84,7 +84,7 @@ async function loadDiff(pi: ExtensionAPI, cwd: string, context: number, signal: 
         });
         signal.throwIfAborted();
         if (!result.truncated && (result.killed || (result.code !== 0 && !(allowDifference && result.code === 1 && !result.stderr)))) {
-            throw new Error(result.killed ? "Git timed out. Press r to retry." : safeText(result.stderr.trim() || "Git failed."));
+            throw new Error(result.killed ? "Git timed out. Retrying automatically." : safeText(result.stderr.trim() || "Git failed."));
         }
         return result;
     };
@@ -207,16 +207,22 @@ export default function (pi: ExtensionAPI) {
                     };
                     input.onEscape = () => { input = undefined; };
                 };
-                const refresh = async (keepPosition = false) => {
+                let poll: ReturnType<typeof setTimeout> | undefined;
+                const refresh = async (keepPosition = false, background = false) => {
+                    clearTimeout(poll);
                     controller?.abort();
                     const current = new AbortController();
                     controller = current;
-                    loading = true;
-                    failed = false;
-                    repaint();
+                    if (!background) {
+                        loading = true;
+                        repaint();
+                    }
                     try {
                         const next = await loadDiff(pi, cwd, context, current.signal);
                         if (closed || current.signal.aborted) return;
+                        if (background && !failed && next.root === root && next.lines.length === lines.length &&
+                            next.lines.every((line, i) => line === lines[i])) return;
+                        failed = false;
                         const offset = cursor - scroll.scrollTop;
                         const selected = keepPosition ? restorePosition(lines, next.lines, cursor) : 0;
                         lines = next.lines;
@@ -247,6 +253,8 @@ export default function (pi: ExtensionAPI) {
                         });
                         limited = lines.some((line) => /^(Review truncated|Untracked file list)/.test(line));
                         maxColumn = lines.reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
+                        column = keepPosition ? Math.min(column, maxColumn) : 0;
+                        repaint();
                     } catch (error) {
                         if (closed || current.signal.aborted) return;
                         failed = true;
@@ -258,11 +266,12 @@ export default function (pi: ExtensionAPI) {
                         maxColumn = cursor = 0;
                         locations.clear();
                         scroll.scrollToStart();
+                        column = 0;
+                        repaint();
                     } finally {
                         if (!closed && controller === current) {
                             loading = false;
-                            column = keepPosition ? Math.min(column, maxColumn) : 0;
-                            repaint();
+                            poll = setTimeout(() => void refresh(true, true), 2_000);
                         }
                     }
                 };
@@ -278,7 +287,7 @@ export default function (pi: ExtensionAPI) {
                     invalidate,
                     get focused() { return focused; },
                     set focused(value: boolean) { focused = value; if (input) input.focused = value; },
-                    dispose() { closed = true; controller?.abort(); },
+                    dispose() { closed = true; clearTimeout(poll); controller?.abort(); },
                     handleInput(data: string) {
                         if (input) {
                             input.handleInput(data);
@@ -303,7 +312,6 @@ export default function (pi: ExtensionAPI) {
                             ].join("\n\n"));
                             return;
                         }
-                        if (matchesKey(data, "r")) { void refresh(); return; }
                         if (loading) return;
                         if (matchesKey(data, "c")) { editComment(); tui.requestRender(); return; }
                         if (matchesKey(data, "+") || matchesKey(data, "-")) {
@@ -344,8 +352,22 @@ export default function (pi: ExtensionAPI) {
                         return undefined;
                     },
                     render(width: number) {
-                        const height = Math.max(1, tui.terminal.rows - bodyStart - 6);
                         const innerWidth = Math.max(0, width - 2);
+                        const hints = input
+                            ? ["Enter: save comment", "Esc: cancel edit", "save empty to remove"]
+                            : discard ? ["y: discard", "any other key: keep reviewing"] : [
+                                theme.fg("accent", locations.has(cursor) && !loading ? "c: add/edit comment" : "Select a source line to comment"),
+                                theme.fg("accent", `Enter: submit to chat (${comments.size})`),
+                                "↑↓/jk select", "n/p file", "PgUp/PgDn page", "←→ pan", "[ ] hunk", "+/- context", "q/Esc close",
+                            ];
+                        const footer: string[] = [];
+                        for (const hint of hints) {
+                            const last = footer.length - 1;
+                            const joined = `${footer[last]} · ${hint}`;
+                            if (last >= 0 && visibleWidth(joined) <= innerWidth) footer[last] = joined;
+                            else footer.push(` ${hint}`);
+                        }
+                        const height = Math.max(1, tui.terminal.rows - bodyStart - 3 - footer.length - Number(!!input || discard));
                         const row = (text: string) => {
                             const clipped = truncateToWidth(text, innerWidth, "");
                             return truncateToWidth(theme.fg("border", "│") + clipped + " ".repeat(Math.max(0, innerWidth - visibleWidth(clipped))) + theme.fg("border", "│"), width, "");
@@ -372,11 +394,9 @@ export default function (pi: ExtensionAPI) {
                                 const marker = (index === cursor ? "›" : " ") + (comments.has(keyFor(index)) ? "*" : " ");
                                 return row(theme.fg("accent", marker) + (body[i] ?? ""));
                             }),
-                            input ? row(input.render(Math.max(1, innerWidth))[0]) : row(theme.fg("accent", discard
-                                ? ` Discard ${comments.size} pending comment(s)? y: discard · any other key: keep reviewing`
-                                : ` ${locations.has(cursor) && !loading ? "c: add/edit comment" : "Select a source line to comment"} · Enter: submit to chat (${comments.size})`)),
-                            row(theme.fg("muted", input ? " Enter: save comment · Esc: cancel edit · save empty to remove" : " ↑↓/jk select · n/p file · PgUp/PgDn page · ←→ pan · [ ] hunk")),
-                            row(theme.fg("muted", " +/- context · q/Esc close · r refresh")),
+                            ...(input ? [row(input.render(Math.max(1, innerWidth))[0])] : discard
+                                ? [row(theme.fg("accent", ` Discard ${comments.size} pending comment(s)?`))] : []),
+                            ...footer.map((line) => row(theme.fg("muted", line))),
                             truncateToWidth(theme.fg("border", "╰" + "─".repeat(innerWidth) + "╯"), width, ""),
                         ];
                     },
