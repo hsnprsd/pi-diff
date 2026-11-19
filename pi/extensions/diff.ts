@@ -1,5 +1,4 @@
 import { lstat } from "node:fs/promises";
-import { homedir } from "node:os";
 import { resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
@@ -14,6 +13,7 @@ import {
 } from "@earendil-works/pi-tui";
 
 const contextStep = 5;
+const bodyStart = 3;
 const maxOutput = 4 * 1024 * 1024;
 const isFileHeader = (line: string) => /^diff --(git|cc|combined) /.test(line);
 const safeText = (text: string) => replaceControlCharacters(text.replaceAll("\t", "    "));
@@ -132,16 +132,17 @@ async function loadDiff(pi: ExtensionAPI, cwd: string, context: number, signal: 
 
 export default function (pi: ExtensionAPI) {
     pi.registerCommand("diff", {
-        description: "Review all uncommitted Git changes inside Pi: /diff [directory]",
+        description: "Review all uncommitted Git changes in the current repository",
         handler: async (args, ctx) => {
             if (ctx.mode !== "tui") {
                 ctx.ui.notify("/diff requires interactive Pi.", "error");
                 return;
             }
-            let directory = args.trim();
-            if (/^(["']).*\1$/.test(directory)) directory = directory.slice(1, -1);
-            if (directory === "~" || directory.startsWith("~/")) directory = homedir() + directory.slice(1);
-            const cwd = resolve(ctx.cwd, directory || ".");
+            if (args.trim()) {
+                ctx.ui.notify("/diff does not accept arguments. It uses the current repository.", "error");
+                return;
+            }
+            const cwd = ctx.cwd;
 
             const review = await ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) => {
                 let lines = ["Loading changes…"];
@@ -250,7 +251,7 @@ export default function (pi: ExtensionAPI) {
                         if (closed || current.signal.aborted) return;
                         failed = true;
                         limited = false;
-                        lines = [safeText(error instanceof Error ? error.message : String(error)), "", `Directory: ${safeText(cwd)}`, "Start Pi in a Git repository, or use /diff /path/to/project."];
+                        lines = [safeText(error instanceof Error ? error.message : String(error)), "", "Start Pi in a Git repository."];
                         files = [];
                         hunks = [];
                         added = removed = 0;
@@ -328,8 +329,8 @@ export default function (pi: ExtensionAPI) {
                     },
                     handleMouse(event: TuiMouseEvent) {
                         if (input || discard || loading) return undefined;
-                        if (event.type === "press" && event.button === "left" && event.y >= 4 && event.y < 4 + scroll.viewportHeight) {
-                            select(scroll.scrollTop + event.y - 4);
+                        if (event.type === "press" && event.button === "left" && event.y >= bodyStart && event.y < bodyStart + scroll.viewportHeight) {
+                            select(scroll.scrollTop + event.y - bodyStart);
                             tui.requestRender();
                             return { handled: true };
                         }
@@ -343,7 +344,7 @@ export default function (pi: ExtensionAPI) {
                         return undefined;
                     },
                     render(width: number) {
-                        const height = Math.max(1, tui.terminal.rows - 10);
+                        const height = Math.max(1, tui.terminal.rows - bodyStart - 6);
                         const innerWidth = Math.max(0, width - 2);
                         const row = (text: string) => {
                             const clipped = truncateToWidth(text, innerWidth, "");
@@ -354,14 +355,14 @@ export default function (pi: ExtensionAPI) {
                         const file = files.length ? Math.max(0, files.findLastIndex((line) => line <= cursor)) : -1;
                         const status = loading ? "Loading…" : failed ? "Could not load changes" : `${files.length} patches · +${added} −${removed}${limited ? " · PARTIAL" : ""}`;
                         const title = ` Diff · context ${context} · ${status}`;
-                        const filename = file >= 0 ? lines[files[file]].replace(/^diff --(git|cc|combined) /, "") : safeText(cwd);
-                        const position = ` ${file >= 0 ? `Patch ${file + 1}/${files.length} · ` : ""}Line ${cursor + 1}/${lines.length} · column ${column + 1}`;
+                        const patch = !loading && file >= 0
+                            ? ` Patch ${file + 1}/${files.length} · ${lines[files[file]].replace(/^diff --(git|cc|combined) /, "")}`
+                            : "";
                         const body = loading ? [theme.fg("muted", "Loading changes… (Esc to cancel)")] : scroll.render(Math.max(1, innerWidth - 2)).slice(scroll.scrollTop, scroll.scrollTop + height);
                         return [
                             truncateToWidth(theme.fg("border", "╭" + "─".repeat(innerWidth) + "╮"), width, ""),
                             row(theme.fg("accent", theme.bold(title))),
-                            row(theme.fg("muted", ` ${loading ? safeText(cwd) : filename}`)),
-                            row(theme.fg("dim", locations.get(cursor) ?? position)),
+                            row(theme.fg("muted", patch)),
                             ...Array.from({ length: height }, (_, i) => {
                                 const index = scroll.scrollTop + i;
                                 const marker = (index === cursor ? "›" : " ") + (comments.has(keyFor(index)) ? "*" : " ");
