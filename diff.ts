@@ -25,10 +25,6 @@ export default function (pi: ExtensionAPI) {
                 ctx.ui.notify("/diff requires interactive Pi.", "error");
                 return;
             }
-            if (args.trim()) {
-                ctx.ui.notify("/diff does not accept arguments. It uses the current repository.", "error");
-                return;
-            }
             const cwd = ctx.cwd;
 
             // Each overlay owns its selection, pending comments, and refresh lifecycle.
