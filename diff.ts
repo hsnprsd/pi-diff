@@ -48,7 +48,6 @@ export default function (pi: ExtensionAPI) {
                 let hunks: number[] = [];
                 let loading = false;
                 let failed = false;
-                let limited = false;
                 let closed = false;
                 let controller: AbortController | undefined;
                 let column = 0;
@@ -134,7 +133,6 @@ export default function (pi: ExtensionAPI) {
                         else if (kind === "-") removed++;
                         maxColumn = Math.max(maxColumn, (lineNumber ? lineNumber.length + 3 : 0) + visibleWidth(text));
                     });
-                    limited = lines.some(line => /^(Review truncated|Untracked file list)/.test(line));
                     column = keepPosition ? Math.min(column, maxColumn) : 0;
                     const selected = Math.max(0, rows.findLastIndex(row => row.raw <= anchor));
                     scroll.updateLayout(rows.length, scroll.viewportHeight, () => tui.requestRender());
@@ -287,7 +285,7 @@ export default function (pi: ExtensionAPI) {
                             return truncateToWidth(theme.fg("border", "│") + clipped + " ".repeat(Math.max(0, innerWidth - visibleWidth(clipped))) + theme.fg("border", "│"), width, "");
                         };
                         if (help) return [
-                            `Review details · context ${context}${loading || failed ? "" : ` · ${files.length} patches · +${added} −${removed}${limited ? " · PARTIAL" : ""}`}`,
+                            `Review details · context ${context}${loading || failed ? "" : ` · ${files.length} patches · +${added} −${removed}`}`,
                             "Review keys", "↑↓ / k j   Select line", "PgUp PgDown / u d   Page up/down",
                             "Home End / g G   First/last line", "←→ / h l   Pan", "n N / Tab Shift+Tab   Next/previous file (p: previous)",
                             "[ ]   Previous/next hunk", "+ -   Adjust context",
@@ -297,7 +295,7 @@ export default function (pi: ExtensionAPI) {
                         scroll.updateLayout(rows.length, height, () => tui.requestRender());
                         select(cursor);
                         const file = files.length ? Math.max(0, files.findLastIndex((line) => line <= cursor)) : -1;
-                        const prefix = ` ${limited && !loading ? "PARTIAL · " : ""}All changes`;
+                        const prefix = " All changes";
                         let title = prefix;
                         if (loading || failed) title += loading ? " · Loading…" : " · Could not load changes";
                         else if (file >= 0) {

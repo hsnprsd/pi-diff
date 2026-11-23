@@ -46,5 +46,4 @@ nearby hunks merge when their context overlaps.
 
 The viewer respects Pi's configured selection/navigation keys and supports mouse
 wheel scrolling in fullscreen mode. Binary changes are identified without
-rendering their contents. Reviews are capped at 4 MiB or 100,000 lines, with an
-explicit notice when truncated. It never stages, edits, or discards files.
+rendering their contents. It never stages, edits, or discards files.

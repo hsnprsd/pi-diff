@@ -46,7 +46,7 @@ export function formatReview(lines: string[]) {
     let anchor: SourceRow | void = undefined;
     for (const [raw, line] of lines.entries()) {
         let text = line, kind: ReviewRow["kind"] = "note";
-        if (!line && /^(──|Review truncated|Untracked file list)/.test(lines[raw + 1] ?? "")) continue;
+        if (!line && lines[raw + 1]?.startsWith("──")) continue;
         if (isFileHeader(line)) {
             kind = "file";
             inHunk = false;
