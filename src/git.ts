@@ -9,7 +9,7 @@ export async function loadDiff(pi: ExtensionAPI, cwd: string, context: number, s
     /** Run Git, optionally accepting exit code 1 from a no-index diff. */
     const git = async (args: string[], allowDifference = false) => {
         signal.throwIfAborted();
-        const result = await pi.exec("git", ["--no-optional-locks", "-c", "core.quotePath=false", ...args], {
+        const result = await pi.exec("git", args, {
             cwd,
             signal,
             timeout: 15_000,
@@ -25,7 +25,7 @@ export async function loadDiff(pi: ExtensionAPI, cwd: string, context: number, s
     const root = await git(["rev-parse", "--show-toplevel"]);
     cwd = root.stdout.replace(/\r?\n$/, "");
     const review = { lines, root: cwd };
-    const diffOptions = [`--unified=${context}`, "--no-ext-diff", "--no-textconv", "--color=never", "--no-relative", "--src-prefix=a/", "--dst-prefix=b/"];
+    const diffOptions = [`--unified=${context}`, "--no-ext-diff", "--no-textconv", "--color=never"];
     const append = (title: string, { stdout }: { stdout: string }) => {
         if (!stdout) return;
         lines.push("", `── ${title} ──`);
