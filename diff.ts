@@ -9,37 +9,16 @@ import {
     type TuiMouseEvent,
 } from "@earendil-works/pi-tui";
 
-import { capture, loadDiff, removeTemp, type Snapshot } from "./src/git.js";
+import { loadDiff } from "./src/git.js";
 import { formatReview, highlightHunks, restorePosition } from "./src/review.js";
 import { safeText } from "./src/text.js";
 
 const contextStep = 5;
 const bodyStart = 2;
 
-/** Register the /diff command and manage the session's most recent prompt snapshot. */
 export default function (pi: ExtensionAPI) {
-    let baseline: Snapshot | undefined;
-    let unavailable = "No prompt snapshot yet. Send a prompt in this session first.";
-    /** Detach the baseline before asynchronously deleting its files. */
-    const clear = async () => {
-        const previous = baseline;
-        baseline = undefined;
-        if (previous) await removeTemp(previous.dir);
-    };
-    pi.on("session_shutdown", clear);
-    // Capture the working tree before a new interactive prompt changes it.
-    pi.on("message_start", async ({ message }, ctx) => {
-        if (message.role !== "user" || ctx.mode !== "tui") return;
-        await clear();
-        try {
-            if (!ctx.isProjectTrusted()) throw new Error("Project is not trusted.");
-            baseline = await capture(pi, ctx.cwd, ctx.signal);
-        } catch (error) {
-            unavailable = `Last prompt snapshot unavailable: ${safeText(String(error))}`;
-        }
-    });
     pi.registerCommand("diff", {
-        description: "Review all uncommitted Git changes or changes since the last prompt",
+        description: "Review all uncommitted Git changes",
         /** Open the interactive review and send submitted comments as one follow-up message. */
         handler: async (args, ctx) => {
             if (ctx.mode !== "tui") {
@@ -56,7 +35,6 @@ export default function (pi: ExtensionAPI) {
             const review = await ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) => {
                 let lines = ["Loading changes…"];
                 let rows = formatReview(lines);
-                let lastPrompt = false;
                 let context = contextStep;
                 let root = cwd;
                 let cursor = 0;
@@ -180,8 +158,7 @@ export default function (pi: ExtensionAPI) {
                         repaint();
                     }
                     try {
-                        const next = lastPrompt && !baseline ? { lines: [unavailable], root: cwd }
-                            : await loadDiff(pi, cwd, context, current.signal, lastPrompt ? baseline : undefined);
+                        const next = await loadDiff(pi, cwd, context, current.signal);
                         if (closed || current.signal.aborted) return;
                         if (background && !failed && next.root === root && next.lines.length === lines.length &&
                             next.lines.every((line, i) => line === lines[i])) return;
@@ -195,7 +172,7 @@ export default function (pi: ExtensionAPI) {
                     } finally {
                         if (!closed && controller === current) {
                             loading = false;
-                            if (!lastPrompt) poll = setTimeout(() => void refresh(true, true), 2_000);
+                            poll = setTimeout(() => void refresh(true, true), 2_000);
                         }
                     }
                 };
@@ -258,7 +235,6 @@ export default function (pi: ExtensionAPI) {
                             ].join("\n\n"));
                             return;
                         }
-                        if (matchesKey(data, "v")) { lastPrompt = !lastPrompt; void refresh(); return; }
                         if (loading) return;
                         if (matchesKey(data, "c")) { editComment(); tui.requestRender(); return; }
                         if (matchesKey(data, "+") || matchesKey(data, "-")) {
@@ -318,15 +294,14 @@ export default function (pi: ExtensionAPI) {
                             `Review details · context ${context}${loading || failed ? "" : ` · ${files.length} patches · +${added} −${removed}${limited ? " · PARTIAL" : ""}`}`,
                             "Review keys", "↑↓ / k j   Select line", "PgUp PgDown / u d   Page up/down",
                             "Home End / g G   First/last line", "←→ / h l   Pan", "n N / Tab Shift+Tab   Next/previous file (p: previous)",
-                            "[ ]   Previous/next hunk", "+ -   Adjust context", "v   Switch review view",
+                            "[ ]   Previous/next hunk", "+ -   Adjust context",
                             "c   Add/edit comment", "Enter   Submit pending comments to chat", "q / Esc   Close review",
                             "? / q / Esc   Back to review",
                         ].map(line => row(` ${line}`));
                         scroll.updateLayout(rows.length, height, () => tui.requestRender());
                         select(cursor);
                         const file = files.length ? Math.max(0, files.findLastIndex((line) => line <= cursor)) : -1;
-                        const view = lastPrompt ? "Last prompt" : "All changes";
-                        const prefix = ` ${limited && !loading ? "PARTIAL · " : ""}${view}`;
+                        const prefix = ` ${limited && !loading ? "PARTIAL · " : ""}All changes`;
                         let title = prefix;
                         if (loading || failed) title += loading ? " · Loading…" : " · Could not load changes";
                         else if (file >= 0) {
