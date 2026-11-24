@@ -14,7 +14,7 @@ The viewer shows the net change from the last commit to your working tree, inclu
 2. Press `c` to write a comment. **In the editor, `Enter` saves a draft** and `Esc` cancels the edit. A `*` marks a saved comment. Press `c` on that line to edit it, or save it empty to remove it.
 3. **In the viewer, `Enter` sends all drafts** to chat as one message, with each comment’s file, line number, and snippet. To close without sending, press `q` or `Esc`. The viewer asks before discarding drafts.
 
-The diff refreshes automatically. If a line changes while you review it, your draft keeps the location and text you originally saw.
+Press `r` to refresh the diff. The viewer also reloads when you change the number of context lines. If a line changes while you review it, your draft keeps the location and text you originally saw.
 
 ## Useful shortcuts
 

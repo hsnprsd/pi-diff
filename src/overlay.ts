@@ -50,22 +50,15 @@ export function createReviewOverlay(
         input.onEscape = () => { input = undefined; };
     };
 
-    let poll: ReturnType<typeof setTimeout> | undefined;
-    /** Replace any in-flight load; background polls skip unchanged patches and leave the view visible. */
-    const refresh = async (keepPosition = false, background = false) => {
-        clearTimeout(poll);
+    const refresh = async (keepPosition = false) => {
         controller?.abort();
         const current = new AbortController();
         controller = current;
-        if (!background) {
-            loading = true;
-            tui.requestRender();
-        }
+        loading = true;
+        tui.requestRender();
         try {
             const next = await loadDiff(pi, cwd, context, current.signal);
             if (closed || current.signal.aborted) return;
-            if (background && !failed && next.root === root && next.lines.length === view.lines.length &&
-                next.lines.every((line, i) => line === view.lines[i])) return;
             failed = false;
             root = next.root;
             updateRows(next.lines, keepPosition);
@@ -76,7 +69,7 @@ export function createReviewOverlay(
         } finally {
             if (!closed && controller === current) {
                 loading = false;
-                poll = setTimeout(() => void refresh(true, true), 2_000);
+                tui.requestRender();
             }
         }
     };
@@ -88,8 +81,8 @@ export function createReviewOverlay(
         get focused() { return focused; },
         /** Forward overlay focus changes to the active comment editor. */
         set focused(value: boolean) { focused = value; if (input) input.focused = value; },
-        /** Stop polling and prevent pending loads from updating the closed overlay. */
-        dispose() { closed = true; clearTimeout(poll); controller?.abort(); },
+        /** Prevent pending loads from updating the closed overlay. */
+        dispose() { closed = true; controller?.abort(); },
         /** Route keys to the active editor or dialog before handling review actions. */
         handleInput(data: string) {
             if (input) {
@@ -123,6 +116,7 @@ export function createReviewOverlay(
                 return;
             }
             if (loading) return;
+            if (matchesKey(data, "r")) { void refresh(true); return; }
             if (matchesKey(data, "c")) { editComment(); tui.requestRender(); return; }
             if (matchesKey(data, "+") || matchesKey(data, "-")) {
                 const next = Math.max(0, context + (matchesKey(data, "+") ? contextStep : -contextStep));
@@ -158,7 +152,7 @@ export function createReviewOverlay(
             const innerWidth = Math.max(0, width - 2);
             const footer = input ? "Enter save · Esc cancel · save empty to remove"
                 : discard ? "y discard · any other key keep reviewing"
-                : ["? keys", "q/Esc close", !loading && rows[cursor]?.location && "c comment",
+                : ["? keys", "r refresh", "q/Esc close", !loading && rows[cursor]?.location && "c comment",
                     comments.size > 0 && `Enter submit (${comments.size})`].filter(Boolean).join(" · ");
             const height = Math.max(1, tui.terminal.rows - bodyStart - 4 - Number(!!input || discard));
             /** Clip and pad a line to fit between the overlay borders. */
@@ -170,7 +164,7 @@ export function createReviewOverlay(
                 `Review details · context ${context}${loading || failed ? "" : ` · ${files.length} patches · +${added} −${removed}`}`,
                 "Review keys", "↑↓ / k j   Select line", "PgUp PgDown / u d   Page up/down",
                 "Home End / g G   First/last line", "←→ / h l   Pan", "n N / Tab Shift+Tab   Next/previous file (p: previous)",
-                "[ ]   Previous/next hunk", "+ -   Adjust context",
+                "[ ]   Previous/next hunk", "+ -   Adjust context", "r   Refresh diff",
                 "c   Add/edit comment", "Enter   Submit pending comments to chat", "q / Esc   Close review",
                 "? / q / Esc   Back to review",
             ].map(line => row(` ${line}`));

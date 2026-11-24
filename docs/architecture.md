@@ -29,7 +29,7 @@ For example, if both counters start at 12, a removal followed by an addition pro
 
 ## Keep the selection across refreshes
 
-[`src/overlay.ts`](../src/overlay.ts) schedules the next background load two seconds after the current load finishes. If the repository root and patch lines have not changed since the last successful load, it skips the rebuild. A context change starts a new load and aborts the previous one. Closing the overlay cancels the timer and aborts any active load.
+[`src/overlay.ts`](../src/overlay.ts) loads the diff when the viewer opens. It reloads only when you press `r` or change the number of context lines. Closing the overlay aborts any active load.
 
 When a rebuild is necessary, `restorePosition` looks for the same file header, then the nearest source line number on the selected side. It prefers the same patch marker when line numbers match. This lets the selection follow a line even when a change in context merges two hunks. If the file header disappears, the search falls back to the start of the patch.
 
