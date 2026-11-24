@@ -177,13 +177,12 @@ export function createReviewOverlay(
             scroll.updateLayout(rows.length, height, () => tui.requestRender());
             select(cursor);
             const file = files.length ? Math.max(0, files.findLastIndex((line) => line <= cursor)) : -1;
-            const prefix = " All changes";
-            let title = prefix;
-            if (loading || failed) title += loading ? " · Loading…" : " · Could not load changes";
+            let title = "";
+            if (loading || failed) title = loading ? " Loading…" : " Could not load changes";
             else if (file >= 0) {
                 const count = ` · ${file + 1}/${files.length}`;
-                const pathWidth = Math.max(0, innerWidth - visibleWidth(prefix + " · " + count));
-                title += ` · ${truncateToWidth(rows[files[file]].text, pathWidth)}${count}`;
+                const pathWidth = Math.max(0, innerWidth - visibleWidth(" " + count));
+                title = ` ${truncateToWidth(rows[files[file]].text, pathWidth)}${count}`;
             }
             const bodyWidth = Math.max(1, innerWidth - 1);
             const body = loading ? [theme.fg("muted", "Loading changes… (q/Esc to close)")] : scroll.render(bodyWidth).slice(scroll.scrollTop, scroll.scrollTop + height);

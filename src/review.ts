@@ -60,8 +60,7 @@ export function formatReview(lines: string[]) {
         } else if (line.startsWith("@@")) {
             kind = "hunk";
             inHunk = true;
-            text = line.replace(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@\s*(.*)$/, (_, old, next, scope) =>
-                `Lines ${old} → ${next}${scope ? `  ·  ${scope}` : ""}`);
+            text = line.replace(/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@\s*/, "");
         } else if (!inHunk && /^(index |--- |\+\+\+ )/.test(line)) {
             if (line.startsWith("--- ")) oldLang = getLanguageFromPath(line.slice(4).trimEnd());
             if (line.startsWith("+++ ")) newLang = getLanguageFromPath(line.slice(4).trimEnd());
