@@ -17,9 +17,7 @@ Git diff overlay for the current repository inside Pi. No external viewer or
 additional package is needed. Each file patch starts with a labeled divider, followed by numbered source
 lines and syntax highlighting for recognized file types. Added and removed lines
 have distinct backgrounds. A `▶` in the left margin marks the selected source line; press `c` to comment on it. Removed lines use the old file’s line
-numbers; added and unchanged lines use the new file’s. Staged and untracked
-patches are labeled; unlabeled patches show unstaged changes. Partially staged
-files have a separate divider for each patch. Ignored untracked files are excluded.
+numbers; added and unchanged lines use the new file’s. The viewer compares the working tree with the last commit. Each file has one patch, regardless of which hunks are staged. New files are included unless Git ignores them.
 The diff refreshes every two seconds, keeping your place where possible.
 
 | Key | Action |
@@ -38,7 +36,7 @@ The diff refreshes every two seconds, keeping your place where possible.
 
 While writing a comment, `Enter` saves the draft and `Esc` cancels the edit.
 Commented lines are marked with `*`, highlighted when selected. Edit a comment and save it empty to remove
-it. Drafts keep their original file, line, patch section, and snippet even if
+it. Drafts keep their original file, line, side of the diff, and snippet even if
 you change context or the diff refreshes before you submit.
 
 Context starts at 5 lines and can go down to zero. Adjust it to inspect adjacent code without leaving the patch;

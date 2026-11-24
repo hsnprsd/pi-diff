@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { safeText } from "./text.js";
 
-/** Load patch sections for uncommitted changes. */
+/** Load patches for uncommitted changes. */
 export async function loadDiff(pi: ExtensionAPI, cwd: string, context: number, signal: AbortSignal) {
     const lines: string[] = [];
     /** Run Git, optionally accepting exit code 1 from a no-index diff. */
@@ -26,16 +26,17 @@ export async function loadDiff(pi: ExtensionAPI, cwd: string, context: number, s
     cwd = root.stdout.replace(/\r?\n$/, "");
     const review = { lines, root: cwd };
     const diffOptions = [`--unified=${context}`, "--no-ext-diff", "--no-textconv", "--color=never"];
-    const append = (title: string, { stdout }: { stdout: string }) => {
+    const append = ({ stdout }: { stdout: string }) => {
         if (!stdout) return;
-        lines.push("", `── ${title} ──`);
         for (const line of stdout.replace(/\n$/, "").split("\n")) {
             lines.push(safeText(line));
         }
     };
 
-    append("Staged · HEAD → index", await git(["diff", "--cached", ...diffOptions, "--"]));
-    append("Unstaged · index → working tree", await git(["diff", ...diffOptions, "--"]));
+    // Before the first commit, compare the working tree with an empty tree.
+    const head = await git(["rev-parse", "--revs-only", "HEAD"]);
+    const base = head.stdout.trim() || (await git(["hash-object", "-t", "tree", "/dev/null"])).stdout.trim();
+    append(await git(["diff", ...diffOptions, base, "--"]));
     const untracked = await git(["ls-files", "--others", "--exclude-standard", "-z"]);
     for (const path of untracked.stdout.split("\0").filter(Boolean)) {
         signal.throwIfAborted();
@@ -45,7 +46,7 @@ export async function loadDiff(pi: ExtensionAPI, cwd: string, context: number, s
             : await git(["diff", "--no-index", ...diffOptions, "--", "/dev/null", path], true);
         // Git emits no patch for an empty untracked file.
         if (!result.stdout) result.stdout = `diff --git a/${safeText(path)} b/${safeText(path)}\nNew empty file\n`;
-        append("Untracked · new file", result);
+        append(result);
     }
     if (!lines.length) lines.push("No uncommitted changes.");
     return review;

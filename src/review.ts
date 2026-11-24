@@ -12,7 +12,7 @@ function* sourceRows(lines: string[], file: number): Generator<SourceRow, void> 
     let oldPath = "", newPath = "";
     for (let row = file + 1; row < lines.length; row++) {
         const line = lines[row];
-        if (isFileHeader(line) || line.startsWith("──")) break;
+        if (isFileHeader(line)) break;
         if (!inHunk && line.startsWith("--- ")) oldPath = line.slice(4).trimEnd();
         if (!inHunk && line.startsWith("+++ ")) newPath = line.slice(4).trimEnd();
         if (line.startsWith("@@")) {
@@ -40,13 +40,12 @@ type ReviewRow = {
 /** Turn raw patch lines into display rows, retaining raw offsets and comment locations for source lines. */
 export function formatReview(lines: string[]) {
     const rows: ReviewRow[] = [];
-    let section = "", inHunk = false;
+    let inHunk = false;
     let oldLang: string | undefined, newLang: string | undefined;
     let source: ReturnType<typeof sourceRows> | undefined;
     let anchor: SourceRow | void = undefined;
     for (const [raw, line] of lines.entries()) {
         let text = line, kind: ReviewRow["kind"] = "note";
-        if (!line && lines[raw + 1]?.startsWith("──")) continue;
         if (isFileHeader(line)) {
             kind = "file";
             inHunk = false;
@@ -56,13 +55,8 @@ export function formatReview(lines: string[]) {
             // same-path header, match both halves (paths may contain spaces).
             const samePath = /^a\/(.+) b\/\1$/.exec(text);
             text = samePath?.[1] ?? text.replace(/^a\/(.+) b\/(.+)$/, "$1 → $2");
-            if (section === "Staged" || section === "Untracked") text += ` · ${section}`;
             source = sourceRows(lines, raw);
             anchor = source.next().value;
-        } else if (line.startsWith("──")) {
-            section = line.slice(3).split(" · ")[0];
-            inHunk = false;
-            continue;
         } else if (line.startsWith("@@")) {
             kind = "hunk";
             inHunk = true;
@@ -75,7 +69,7 @@ export function formatReview(lines: string[]) {
         } else if (source && anchor && anchor.row === raw) {
             const { oldLine, newLine, path, kind } = anchor;
             const old = kind === "-", number = old ? oldLine : newLine;
-            const location = `${path.replace(/^[ab]\//, "")}:${number} (${section}, ${old ? "old" : "new"})`;
+            const location = `${path.replace(/^[ab]\//, "")}:${number} (${old ? "old" : "new"})`;
             rows.push({ raw, kind, text: line.slice(1), lineNumber: String(number).padStart(4), location });
             anchor = source.next().value;
             continue;
@@ -112,19 +106,12 @@ export function highlightHunks(rows: ReviewRow[]) {
     return colored;
 }
 
-/** Map a raw row into a refreshed patch, preferring the same source line in the same file and section. */
+/** Map a raw row into a refreshed patch, preferring the same source line in the same file. */
 export function restorePosition(before: string[], after: string[], top: number) {
-    // A partially staged file has two patches with the same Git header.
-    const section = before.findLastIndex((line, i) => i <= top && line.startsWith("──"));
-    if (section < 0) return top;
-    let file = before.findLastIndex((line, i) => i <= top && isFileHeader(line));
-    if (file < section) file = section + 1; // The section title precedes its first patch.
-    let group = "";
-    const nextFile = after.findIndex((line) => {
-        if (line.startsWith("──")) group = line;
-        return group === before[section] && line === before[file];
-    });
-    if (nextFile < 0) return Math.max(0, after.indexOf(before[section]));
+    const file = before.findLastIndex((line, i) => i <= top && isFileHeader(line));
+    if (file < 0) return top;
+    const nextFile = after.indexOf(before[file]);
+    if (nextFile < 0) return 0;
     const fallback = nextFile + top - file;
     for (const anchor of sourceRows(before, file)) {
         if (anchor.row < top) continue;
