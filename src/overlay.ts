@@ -152,7 +152,7 @@ export function createReviewOverlay(
             }
             return undefined;
         },
-        /** Draw the help screen or compose the framed viewport, selection markers, and footer. */
+        /** Draw the help screen or compose the framed viewport, row highlights, and footer. */
         render(width: number) {
             const { cursor, rows, files, added, removed } = view;
             const innerWidth = Math.max(0, width - 2);
@@ -193,9 +193,11 @@ export function createReviewOverlay(
                     const index = scroll.scrollTop + i;
                     const selected = !loading && index === cursor && !!rows[index]?.location;
                     const commented = !loading && comments.has(keyFor(index));
-                    const marker = commented ? "*" : selected ? "▶" : " ";
-                    const styled = selected ? theme.fg("accent", theme.bold(marker)) : theme.fg("muted", marker);
-                    return row(styled + (body[i] ?? ""));
+                    const marker = commented ? theme.fg("accent", "*") : " ";
+                    const line = marker + (body[i] ?? "");
+                    const kind = !loading && rows[index]?.kind;
+                    const bg = selected ? "selectedBg" : kind === "+" ? "toolSuccessBg" : kind === "-" ? "toolErrorBg" : undefined;
+                    return row(bg ? theme.bg(bg, line) : line);
                 }),
                 ...(input ? [row(input.render(Math.max(1, innerWidth))[0])] : discard
                     ? [row(theme.fg("accent", ` Discard ${comments.size} pending comment(s)?`))] : []),

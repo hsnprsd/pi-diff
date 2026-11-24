@@ -35,9 +35,7 @@ export function createViewport(tui: TUI, theme: Theme, keybindings: KeybindingsM
                 const content = lineNumber ? theme.fg("muted", lineNumber) + theme.fg(fg, ` ${kind} `) + (syntax?.get(raw) ?? text) : text;
                 const value = sliceByColumn(content, column, width, true);
                 const body = value + " ".repeat(Math.max(0, width - visibleWidth(value)));
-                return kind === "+" ? theme.bg("toolSuccessBg", body)
-                    : kind === "-" ? theme.bg("toolErrorBg", body)
-                    : kind === "hunk" ? theme.fg("muted", body) : body;
+                return kind === "hunk" ? theme.fg("muted", body) : body;
             });
             return cached;
         },
