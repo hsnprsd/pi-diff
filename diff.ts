@@ -325,7 +325,7 @@ export default function (pi: ExtensionAPI) {
                 };
             }, {
                 overlay: true,
-                overlayOptions: { width: "100%", maxHeight: "75%", margin: 1 },
+                overlayOptions: { width: "100%", maxHeight: "100%", margin: 0 },
                 blocked: { kind: "question", message: "Reviewing Git changes" },
             });
             if (review) pi.sendUserMessage(review, { deliverAs: "followUp" });
