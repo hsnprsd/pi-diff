@@ -3,11 +3,9 @@ import { resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { safeText } from "./text.js";
 
-/** Load patches for uncommitted changes. */
-export async function loadDiff(pi: ExtensionAPI, cwd: string, context: number, signal: AbortSignal) {
-    const lines: string[] = [];
-    /** Run Git, optionally accepting exit code 1 from a no-index diff. */
-    const git = async (args: string[], allowDifference = false) => {
+/** Run Git in one directory. A no-index diff can exit with code 1. */
+function gitRunner(pi: ExtensionAPI, cwd: string, signal: AbortSignal) {
+    return async (args: string[], allowDifference = false) => {
         signal.throwIfAborted();
         const result = await pi.exec("git", args, {
             cwd,
@@ -19,14 +17,23 @@ export async function loadDiff(pi: ExtensionAPI, cwd: string, context: number, s
         if (result.killed || (result.code !== 0 && !(allowDifference && result.code === 1 && !result.stderr))) {
             throw new Error(result.killed ? "Git timed out." : safeText(result.stderr.trim() || "Git failed."));
         }
-        return result;
+        return result.stdout;
     };
+}
 
-    const root = await git(["rev-parse", "--show-toplevel"]);
-    cwd = root.stdout.replace(/\r?\n$/, "");
-    const review = { lines, root: cwd };
+function describeUntracked(path: string, message: string) {
+    const name = safeText(path);
+    return `diff --git a/${name} b/${name}\n${message}\n`;
+}
+
+/** Load patches for uncommitted changes. */
+export async function loadDiff(pi: ExtensionAPI, cwd: string, context: number, signal: AbortSignal) {
+    const localGit = gitRunner(pi, cwd, signal);
+    const root = (await localGit(["rev-parse", "--show-toplevel"])).replace(/\r?\n$/, "");
+    const git = gitRunner(pi, root, signal);
+    const lines: string[] = [];
     const diffOptions = [`--unified=${context}`, "--no-ext-diff", "--no-textconv", "--color=never"];
-    const append = ({ stdout }: { stdout: string }) => {
+    const append = (stdout: string) => {
         if (!stdout) return;
         for (const line of stdout.replace(/\n$/, "").split("\n")) {
             lines.push(safeText(line));
@@ -35,19 +42,18 @@ export async function loadDiff(pi: ExtensionAPI, cwd: string, context: number, s
 
     // Before the first commit, compare the working tree with an empty tree.
     const head = await git(["rev-parse", "--revs-only", "HEAD"]);
-    const base = head.stdout.trim() || (await git(["hash-object", "-t", "tree", "/dev/null"])).stdout.trim();
+    const base = head.trim() || (await git(["hash-object", "-t", "tree", "/dev/null"])).trim();
     append(await git(["diff", ...diffOptions, base, "--"]));
     const untracked = await git(["ls-files", "--others", "--exclude-standard", "-z"]);
-    for (const path of untracked.stdout.split("\0").filter(Boolean)) {
+    for (const path of untracked.split("\0").filter(Boolean)) {
         signal.throwIfAborted();
-        const directory = (await lstat(resolve(cwd, path))).isDirectory();
-        const result = directory
-            ? { stdout: `diff --git a/${safeText(path)} b/${safeText(path)}\nUntracked directory; contents not expanded\n` }
-            : await git(["diff", "--no-index", ...diffOptions, "--", "/dev/null", path], true);
-        // Git emits no patch for an empty untracked file.
-        if (!result.stdout) result.stdout = `diff --git a/${safeText(path)} b/${safeText(path)}\nNew empty file\n`;
-        append(result);
+        if ((await lstat(resolve(root, path))).isDirectory()) {
+            append(describeUntracked(path, "Untracked directory; contents not expanded"));
+            continue;
+        }
+        const patch = await git(["diff", "--no-index", ...diffOptions, "--", "/dev/null", path], true);
+        append(patch || describeUntracked(path, "New empty file"));
     }
     if (!lines.length) lines.push("No uncommitted changes.");
-    return review;
+    return { lines, root };
 }
